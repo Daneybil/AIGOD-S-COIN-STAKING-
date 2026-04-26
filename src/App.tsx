@@ -26,9 +26,9 @@ import { cn, formatBNB, formatToken } from './lib/utils';
 import { CONTRACT_ABI, ERC20_ABI } from './constants';
 
 // --- CONFIG ---
-const STAKING_CONTRACT_ADDRESS = "0x0000000000000000000000000000000000000000"; // Placeholder
-const TOKEN_ADDRESS = "0x0000000000000000000000000000000000000000"; // Placeholder
-const RPC_URL = "https://bsc-dataseed.binance.org/"; // Assume BSC
+const STAKING_CONTRACT_ADDRESS = "0xD70F4689A352E141a091eAC9E44C97bE59ECFE29";
+const TOKEN_ADDRESS = "0xAa3272736aA631dBa7f7b03a3e96289428EBD87C";
+const RPC_URL = "https://bsc-dataseed.binance.org/"; // BSC Mainnet
 
 // --- TYPES ---
 interface GlobalStats {
@@ -115,6 +115,23 @@ export default function App() {
   }, [account, provider]);
 
   useEffect(() => {
+    // Auto-connect if already authorized
+    const checkConnection = async () => {
+      if ((window as any).ethereum) {
+        try {
+          const _provider = new BrowserProvider((window as any).ethereum);
+          const accounts = await _provider.send("eth_accounts", []);
+          if (accounts.length > 0) {
+            setAccount(accounts[0]);
+            setProvider(_provider);
+          }
+        } catch (error) {
+          console.error("Auto-connect failed", error);
+        }
+      }
+    };
+    checkConnection();
+
     fetchData();
     const interval = setInterval(fetchData, 30000); // 30s refresh
     return () => clearInterval(interval);
