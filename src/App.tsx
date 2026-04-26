@@ -56,15 +56,46 @@ export default function App() {
   const [provider, setProvider] = useState<BrowserProvider | null>(null);
   const [stats, setStats] = useState<GlobalStats | null>(null);
   const [userStake, setUserStake] = useState<UserStake | null>(null);
+  const [userBalance, setUserBalance] = useState<bigint>(0n);
   const [loading, setLoading] = useState(false);
   const [stakeAmount, setStakeAmount] = useState('');
   const [stakeDuration, setStakeDuration] = useState(40);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
 
   // --- CONNECT WALLET ---
+  const switchNetwork = async () => {
+    if (!(window as any).ethereum) return;
+    try {
+      await (window as any).ethereum.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: '0x38' }], // BSC Mainnet
+      });
+    } catch (switchError: any) {
+      if (switchError.code === 4902) {
+        try {
+          await (window as any).ethereum.request({
+            method: 'wallet_addEthereumChain',
+            params: [
+              {
+                chainId: '0x38',
+                chainName: 'Binance Smart Chain',
+                nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 },
+                rpcUrls: [RPC_URL],
+                blockExplorerUrls: ['https://bscscan.com/'],
+              },
+            ],
+          });
+        } catch (addError) {
+          console.error("Failed to add BSC network", addError);
+        }
+      }
+    }
+  };
+
   const connectWallet = async () => {
     if ((window as any).ethereum) {
       try {
+        await switchNetwork();
         const _provider = new BrowserProvider((window as any).ethereum);
         const accounts = await _provider.send("eth_requestAccounts", []);
         setAccount(accounts[0]);
@@ -97,6 +128,10 @@ export default function App() {
 
       // Get User Stats if connected
       if (account) {
+        const tokenContract = new Contract(TOKEN_ADDRESS, ERC20_ABI, readProvider);
+        const balance = await tokenContract.balanceOf(account);
+        setUserBalance(balance);
+
         const stakeDetails = await contract.stakes(account);
         const earnedAmount = await contract.earned(account);
         setUserStake({
@@ -122,6 +157,7 @@ export default function App() {
           const _provider = new BrowserProvider((window as any).ethereum);
           const accounts = await _provider.send("eth_accounts", []);
           if (accounts.length > 0) {
+            await switchNetwork();
             setAccount(accounts[0]);
             setProvider(_provider);
           }
@@ -149,18 +185,28 @@ export default function App() {
       const amount = parseUnits(stakeAmount, 18);
       const durationSeconds = BigInt(stakeDuration) * 24n * 3600n;
 
-      // Approve
-      const txApprove = await tokenContract.approve(STAKING_CONTRACT_ADDRESS, amount);
-      await txApprove.wait();
+      // Check allowance
+      console.log("Checking allowance...");
+      const allowance = await tokenContract.allowance(account, STAKING_CONTRACT_ADDRESS);
+      if (allowance < amount) {
+        console.log("Approving...");
+        const txApprove = await tokenContract.approve(STAKING_CONTRACT_ADDRESS, amount);
+        await txApprove.wait();
+        console.log("Approved.");
+      }
 
       // Stake
+      console.log("Staking...");
       const txStake = await stakingContract.stake(amount, durationSeconds);
       await txStake.wait();
+      console.log("Staked.");
 
       fetchData();
       setStakeAmount('');
-    } catch (error) {
+      alert("Staking successful!");
+    } catch (error: any) {
       console.error("Staking failed", error);
+      alert("Staking failed: " + (error?.reason || error?.message || "Unknown error"));
     } finally {
       setLoading(false);
     }
@@ -404,7 +450,10 @@ export default function App() {
 
               <div className="space-y-8">
                 <div>
-                  <label className="text-sm font-bold text-gray-400 mb-3 block">Amount to Stake</label>
+                  <div className="flex justify-between mb-3">
+                    <label className="text-sm font-bold text-gray-400 block">Amount to Stake</label>
+                    <span className="text-xs font-bold text-gold">Balance: {formatToken(userBalance)} AIGODS</span>
+                  </div>
                   <div className="relative">
                     <input 
                       type="number"
@@ -413,7 +462,12 @@ export default function App() {
                       onChange={(e) => setStakeAmount(e.target.value)}
                       className="w-full bg-white/5 border border-white/10 rounded-2xl px-6 py-4 text-xl font-bold focus:outline-none focus:border-gold transition-colors"
                     />
-                    <button className="absolute right-4 top-1/2 -translate-y-1/2 text-gold font-bold hover:text-white transition-colors">MAX</button>
+                    <button 
+                      onClick={() => setStakeAmount(formatEther(userBalance))}
+                      className="absolute right-4 top-1/2 -translate-y-1/2 text-gold font-bold hover:text-white transition-colors"
+                    >
+                      MAX
+                    </button>
                   </div>
                 </div>
 
