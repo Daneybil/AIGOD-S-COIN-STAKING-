@@ -57,6 +57,7 @@ export default function App() {
   const [stats, setStats] = useState<GlobalStats | null>(null);
   const [userStake, setUserStake] = useState<UserStake | null>(null);
   const [userBalance, setUserBalance] = useState<bigint>(0n);
+  const [userBNBBalance, setUserBNBBalance] = useState<bigint>(0n);
   const [loading, setLoading] = useState(false);
   const [stakeAmount, setStakeAmount] = useState('');
   const [stakeDuration, setStakeDuration] = useState(40);
@@ -95,24 +96,26 @@ export default function App() {
   const connectWallet = async () => {
     if ((window as any).ethereum) {
       try {
-        await switchNetwork();
         const _provider = new BrowserProvider((window as any).ethereum);
         const accounts = await _provider.send("eth_requestAccounts", []);
         
-        // Listeners for better UX
+        setAccount(accounts[0]);
+        setProvider(_provider);
+
+        // Background network switch attempt
+        switchNetwork().catch(console.error);
+        
+        // Listeners
         (window as any).ethereum.on('accountsChanged', (newAccounts: string[]) => {
           if (newAccounts.length > 0) setAccount(newAccounts[0]);
           else setAccount(null);
         });
         (window as any).ethereum.on('chainChanged', () => window.location.reload());
-
-        setAccount(accounts[0]);
-        setProvider(_provider);
       } catch (error) {
         console.error("Wallet connection failed", error);
       }
     } else {
-      alert("Please install MetaMask!");
+      alert("Please install a wallet like Trust Wallet or MetaMask!");
     }
   };
 
@@ -138,13 +141,15 @@ export default function App() {
       // Get User Stats if connected
       if (account) {
         const tokenContract = new Contract(TOKEN_ADDRESS, ERC20_ABI, readProvider);
-        const [balance, stakeDetails, earnedAmount] = await Promise.all([
+        const [balance, bnbBalance, stakeDetails, earnedAmount] = await Promise.all([
           tokenContract.balanceOf(account),
+          readProvider.getBalance(account),
           contract.stakes(account),
           contract.earned(account)
         ]);
 
         setUserBalance(balance);
+        setUserBNBBalance(bnbBalance);
         setUserStake({
           amount: stakeDetails.amount,
           startTime: stakeDetails.startTime,
@@ -168,9 +173,9 @@ export default function App() {
           const _provider = new BrowserProvider((window as any).ethereum);
           const accounts = await _provider.send("eth_accounts", []);
           if (accounts.length > 0) {
-            await switchNetwork();
             setAccount(accounts[0]);
             setProvider(_provider);
+            switchNetwork().catch(console.error);
           }
         } catch (error) {
           console.error("Auto-connect failed", error);
@@ -189,12 +194,27 @@ export default function App() {
     if (!account || !provider || !stakeAmount) return;
     setLoading(true);
     try {
-      await switchNetwork(); // Ensure correct network before transaction
-      const signer = await provider.getSigner();
+      // Create a fresh provider instance to ensure we're on the right track
+      const _tempProvider = new BrowserProvider((window as any).ethereum);
+      const network = await _tempProvider.getNetwork();
       
-      // Verify contract addresses have code on this network
-      const code = await provider.getCode(TOKEN_ADDRESS);
-      if (code === "0x") throw new Error("Token contract not found on this network. Please switch to BSC Mainnet.");
+      // Force network switch if not on BSC (Chain ID 56)
+      if (network.chainId !== 56n) {
+        await switchNetwork();
+        // Re-check after potential switch
+        const updatedNetwork = await _tempProvider.getNetwork();
+        if (updatedNetwork.chainId !== 56n) {
+          throw new Error("Please switch your wallet to Binance Smart Chain Mainnet.");
+        }
+      }
+
+      const signer = await _tempProvider.getSigner();
+      
+      // Verify token contract exists on the current network
+      const code = await _tempProvider.getCode(TOKEN_ADDRESS);
+      if (code === "0x" || code === "0x0") {
+        throw new Error("AIGODS Token contract not found. Please verify you are on BSC Mainnet.");
+      }
 
       const tokenContract = new Contract(TOKEN_ADDRESS, ERC20_ABI, signer);
       const stakingContract = new Contract(STAKING_CONTRACT_ADDRESS, CONTRACT_ABI, signer);
@@ -202,29 +222,37 @@ export default function App() {
       const amount = parseUnits(stakeAmount, 18);
       const durationSeconds = BigInt(stakeDuration) * 24n * 3600n;
 
-      // Check allowance
+      // Check user balance first
+      const currentBalance = await tokenContract.balanceOf(account);
+      if (currentBalance < amount) {
+        throw new Error("Insufficient AIGODS balance in your wallet.");
+      }
+
+      // Check and handle allowance
       console.log("Checking allowance...");
       const allowance = await tokenContract.allowance(account, STAKING_CONTRACT_ADDRESS);
       if (allowance < amount) {
-        console.log("Approving...");
+        console.log("Approving AIGODS...");
         const txApprove = await tokenContract.approve(STAKING_CONTRACT_ADDRESS, ethers.MaxUint256);
         await txApprove.wait();
-        console.log("Approved.");
+        console.log("Approved successfully.");
       }
 
-      // Stake
-      console.log("Staking...");
+      // Execute Stake
+      console.log("Executing stake...");
       const txStake = await stakingContract.stake(amount, durationSeconds);
-      await txStake.wait();
-      console.log("Staked.");
+      console.log("Transaction broadcasted:", txStake.hash);
+      const receipt = await txStake.wait();
+      console.log("Stake confirmed in block:", receipt.blockNumber);
 
       fetchData();
       setStakeAmount('');
-      setLoading(false);
-      alert("Staking successful!");
+      alert("Success! Your AIGODS have been staked.");
     } catch (error: any) {
-      console.error("Staking failed", error);
-      alert("Staking failed: " + (error?.reason || error?.message || "Unknown error"));
+      console.error("Staking action failed:", error);
+      const message = error?.reason || error?.message || "An unexpected error occurred during staking.";
+      alert("Staking failed: " + message);
+    } finally {
       setLoading(false);
     }
   };
@@ -469,7 +497,10 @@ export default function App() {
                 <div>
                   <div className="flex justify-between mb-3">
                     <label className="text-sm font-bold text-gray-400 block">Amount to Stake</label>
-                    <span className="text-xs font-bold text-gold">Balance: {formatToken(userBalance)} AIGODS</span>
+                    <div className="text-right">
+                      <p className="text-xs font-bold text-gold">AIGODS: {formatToken(userBalance)}</p>
+                      <p className="text-[10px] text-gray-500 font-bold">BNB: {formatBNB(userBNBBalance)}</p>
+                    </div>
                   </div>
                   <div className="relative">
                     <input 
