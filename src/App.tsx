@@ -80,7 +80,7 @@ export default function App() {
                 chainId: '0x38',
                 chainName: 'Binance Smart Chain',
                 nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 },
-                rpcUrls: [RPC_URL],
+                rpcUrls: ["https://bsc-dataseed.binance.org/"],
                 blockExplorerUrls: ['https://bscscan.com/'],
               },
             ],
@@ -98,6 +98,14 @@ export default function App() {
         await switchNetwork();
         const _provider = new BrowserProvider((window as any).ethereum);
         const accounts = await _provider.send("eth_requestAccounts", []);
+        
+        // Listeners for better UX
+        (window as any).ethereum.on('accountsChanged', (newAccounts: string[]) => {
+          if (newAccounts.length > 0) setAccount(newAccounts[0]);
+          else setAccount(null);
+        });
+        (window as any).ethereum.on('chainChanged', () => window.location.reload());
+
         setAccount(accounts[0]);
         setProvider(_provider);
       } catch (error) {
@@ -111,7 +119,8 @@ export default function App() {
   // --- FETCH DATA ---
   const fetchData = useCallback(async () => {
     try {
-      const readProvider = provider || new ethers.JsonRpcProvider(RPC_URL);
+      // Use public RPC for reading to avoid wallet dependency
+      const readProvider = new ethers.JsonRpcProvider(RPC_URL);
       const contract = new Contract(STAKING_CONTRACT_ADDRESS, CONTRACT_ABI, readProvider);
       
       // Get Global Stats
@@ -129,11 +138,13 @@ export default function App() {
       // Get User Stats if connected
       if (account) {
         const tokenContract = new Contract(TOKEN_ADDRESS, ERC20_ABI, readProvider);
-        const balance = await tokenContract.balanceOf(account);
-        setUserBalance(balance);
+        const [balance, stakeDetails, earnedAmount] = await Promise.all([
+          tokenContract.balanceOf(account),
+          contract.stakes(account),
+          contract.earned(account)
+        ]);
 
-        const stakeDetails = await contract.stakes(account);
-        const earnedAmount = await contract.earned(account);
+        setUserBalance(balance);
         setUserStake({
           amount: stakeDetails.amount,
           startTime: stakeDetails.startTime,
@@ -147,7 +158,7 @@ export default function App() {
     } catch (error) {
       console.error("Fetch data failed", error);
     }
-  }, [account, provider]);
+  }, [account]);
 
   useEffect(() => {
     // Auto-connect if already authorized
@@ -169,7 +180,7 @@ export default function App() {
     checkConnection();
 
     fetchData();
-    const interval = setInterval(fetchData, 30000); // 30s refresh
+    const interval = setInterval(fetchData, 15000); // 15s refresh
     return () => clearInterval(interval);
   }, [fetchData]);
 
@@ -178,7 +189,13 @@ export default function App() {
     if (!account || !provider || !stakeAmount) return;
     setLoading(true);
     try {
+      await switchNetwork(); // Ensure correct network before transaction
       const signer = await provider.getSigner();
+      
+      // Verify contract addresses have code on this network
+      const code = await provider.getCode(TOKEN_ADDRESS);
+      if (code === "0x") throw new Error("Token contract not found on this network. Please switch to BSC Mainnet.");
+
       const tokenContract = new Contract(TOKEN_ADDRESS, ERC20_ABI, signer);
       const stakingContract = new Contract(STAKING_CONTRACT_ADDRESS, CONTRACT_ABI, signer);
       
@@ -190,7 +207,7 @@ export default function App() {
       const allowance = await tokenContract.allowance(account, STAKING_CONTRACT_ADDRESS);
       if (allowance < amount) {
         console.log("Approving...");
-        const txApprove = await tokenContract.approve(STAKING_CONTRACT_ADDRESS, amount);
+        const txApprove = await tokenContract.approve(STAKING_CONTRACT_ADDRESS, ethers.MaxUint256);
         await txApprove.wait();
         console.log("Approved.");
       }
@@ -203,11 +220,11 @@ export default function App() {
 
       fetchData();
       setStakeAmount('');
+      setLoading(false);
       alert("Staking successful!");
     } catch (error: any) {
       console.error("Staking failed", error);
       alert("Staking failed: " + (error?.reason || error?.message || "Unknown error"));
-    } finally {
       setLoading(false);
     }
   };
@@ -496,8 +513,19 @@ export default function App() {
                     <span className="text-gray-400">Selected Multiplier</span>
                     <span className="font-bold text-gold">{multipliers.find(m => m.days === stakeDuration)?.mul}</span>
                   </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-400">Effective Weight</span>
+                  <div className="flex justify-between items-center">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-gray-400">Effective Weight</span>
+                      <div className="group relative">
+                        <Info size={12} className="text-gray-500 cursor-help" />
+                        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 p-2 bg-dark-bg border border-white/10 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none text-[10px] text-gray-300 z-50">
+                          <strong>Weight Calculation:</strong><br />
+                          Stake Amount × Multiplier.<br />
+                          e.g. 7,000 × 2.5x = 17,500 Shares.<br />
+                          This is your share of the reward pool.
+                        </div>
+                      </div>
+                    </div>
                     <span className="font-bold text-white">
                       {stakeAmount ? formatToken(Number(stakeAmount) * Number(multipliers.find(m => m.days === stakeDuration)?.mul.replace('x', ''))) : "0"} SHARES
                     </span>
