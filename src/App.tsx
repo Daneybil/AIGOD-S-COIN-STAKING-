@@ -94,33 +94,40 @@ export default function App() {
   };
 
   const connectWallet = async () => {
-    if ((window as any).ethereum) {
-      try {
-        // First request accounts
-        const accounts = await (window as any).ethereum.request({ method: 'eth_requestAccounts' });
-        if (accounts && accounts.length > 0) {
-          const _provider = new BrowserProvider((window as any).ethereum);
-          setAccount(accounts[0]);
-          setProvider(_provider);
-
-          // Network switch is important but shouldn't block the initial connection
-          switchNetwork().catch(console.error);
-
-          // Setup Listeners
-          if ((window as any).ethereum.on) {
-            (window as any).ethereum.on('accountsChanged', (newAccounts: string[]) => {
-              if (newAccounts.length > 0) setAccount(newAccounts[0]);
-              else setAccount(null);
-            });
-            (window as any).ethereum.on('chainChanged', () => window.location.reload());
-          }
-        }
-      } catch (error) {
-        console.error("Wallet connection failed", error);
-        alert("Connection failed. Please unlock your wallet and try again.");
-      }
-    } else {
+    const eth = (window as any).ethereum;
+    if (!eth) {
       alert("No crypto wallet found. Please install Trust Wallet or MetaMask.");
+      return;
+    }
+
+    try {
+      // Standard request accounts
+      const accounts = await eth.request({ method: 'eth_requestAccounts' });
+      
+      if (accounts && accounts.length > 0) {
+        const _provider = new BrowserProvider(eth);
+        setAccount(accounts[0]);
+        setProvider(_provider);
+
+        // Attempt background switch, but don't let it block connection
+        switchNetwork().catch((e) => console.log("Init network switch suppressed:", e.message));
+
+        // Listeners for persistence
+        if (eth.on) {
+          eth.on('accountsChanged', (newAccounts: string[]) => {
+            if (newAccounts.length > 0) setAccount(newAccounts[0]);
+            else setAccount(null);
+          });
+          eth.on('chainChanged', () => window.location.reload());
+        }
+      }
+    } catch (error: any) {
+      console.error("Wallet connection failed", error);
+      if (error.code === 4001) {
+        alert("Wallet connection rejected by user.");
+      } else {
+        alert("Failed to connect wallet. Please ensure it is unlocked and try again.");
+      }
     }
   };
 
@@ -197,53 +204,64 @@ export default function App() {
   // --- ACTIONS ---
   const handleStake = async () => {
     if (!account || !stakeAmount) {
-      alert("Please connect wallet and enter amount.");
+      alert("Connect wallet and enter amount first.");
       return;
     }
+    
     setLoading(true);
     try {
-      if (!(window as any).ethereum) throw new Error("Wallet not found.");
+      const eth = (window as any).ethereum;
+      if (!eth) throw new Error("Wallet provider not found.");
       
-      const _tempProvider = new BrowserProvider((window as any).ethereum);
+      const _tempProvider = new BrowserProvider(eth);
       const network = await _tempProvider.getNetwork();
       
-      // BSC Mainnet Chain ID is 56 (0x38)
+      // Ensure we are on BSC (Chain ID 56)
       if (network.chainId !== 56n) {
-        alert("Switching to Binance Smart Chain...");
-        await switchNetwork();
-        // Wait a bit for the provider to sync
-        await new Promise(r => setTimeout(r, 1000));
+        try {
+          await switchNetwork();
+          // Give it a moment to update
+          await new Promise(r => setTimeout(r, 1000));
+        } catch (e) {
+          throw new Error("Please switch to Binance Smart Chain Mainnet to stake.");
+        }
       }
 
       const signer = await _tempProvider.getSigner();
+      if (!signer) throw new Error("Signer not available. Please unlock your wallet.");
+
       const tokenContract = new Contract(TOKEN_ADDRESS, ERC20_ABI, signer);
       const stakingContract = new Contract(STAKING_CONTRACT_ADDRESS, CONTRACT_ABI, signer);
       
       const amount = parseUnits(stakeAmount, 18);
       const durationSeconds = BigInt(stakeDuration) * 24n * 3600n;
 
-      // Check balance
-      const balance = await tokenContract.balanceOf(account);
-      if (balance < amount) throw new Error("Insufficient AIGODS balance.");
+      // Verify basic data to prevent silent fails
+      const userBal = await tokenContract.balanceOf(account);
+      if (userBal < amount) throw new Error("Insufficient AIGODS balance in wallet.");
 
-      // Check allowance
+      // Approval logic
       const allowance = await tokenContract.allowance(account, STAKING_CONTRACT_ADDRESS);
       if (allowance < amount) {
-        console.log("Approving...");
+        console.log("Requesting approval...");
         const txApprove = await tokenContract.approve(STAKING_CONTRACT_ADDRESS, ethers.MaxUint256);
         await txApprove.wait();
+        console.log("Approval confirmed.");
       }
 
-      // Stake
+      // Staking logic
+      console.log("Sending stake transaction...");
       const txStake = await stakingContract.stake(amount, durationSeconds);
+      console.log("Stake TX Hash:", txStake.hash);
       await txStake.wait();
-
-      alert("Stake successful!");
+      
+      alert("Successfully staked your AIGODS!");
       setStakeAmount('');
       fetchData();
     } catch (error: any) {
-      console.error("Stake error:", error);
-      alert("Error: " + (error?.reason || error?.message || "Transaction failed"));
+      console.error("Stake logic error:", error);
+      const errMsg = error?.reason || error?.message || "Staking transaction failed.";
+      alert("Transaction Failed: " + errMsg);
     } finally {
       setLoading(false);
     }
